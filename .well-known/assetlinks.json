@@ -1,0 +1,14 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.example.kintone",
+      "sha256_cert_fingerprints": [
+        "A2:25:05:5E:EA:5F:01:DF:5D:AF:CA:9C:27:E0:1A:8A:44:D4:92:F4:32:F7:26:16:CE:6C:57:EE:22:AC:42:43"
+      ]
+    }
+  }
+]
