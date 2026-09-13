@@ -1,15 +1,9 @@
-
 name: Update Japan WPI ports
 
 on:
   workflow_dispatch:
 
   schedule:
-    # UTC 19:00 = JST 翌日04:00
-    # 毎月1日 JST 04:00 にしたいため、
-    # UTCでは前月末日の指定が複雑になる。
-    # ここでは毎月1日 UTC 19:00
-    # = 毎月2日 JST 04:00 とする。
     - cron: "0 19 1 * *"
 
 permissions:
@@ -20,17 +14,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Download NGA WPI and build Japan CSV
-        run: |
-          python scripts/update_wpi_japan.py
+      - name: Build Japan WPI CSV
+        run: python scripts/update_wpi_japan.py
 
       - name: Show generated CSV
         run: |
@@ -40,7 +33,7 @@ jobs:
           echo "===== first 20 lines ====="
           head -20 data/ports/wpi-japan.csv
 
-      - name: Commit changes
+      - name: Commit generated CSV
         run: |
           if git diff --quiet -- data/ports/wpi-japan.csv; then
             echo "WPIデータに変更はありません。"
@@ -51,7 +44,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add data/ports/wpi-japan.csv
-
           git commit -m "Update Japan WPI port data"
-
           git push
