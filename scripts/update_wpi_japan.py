@@ -1,230 +1,78 @@
-import ssl
 import csv
-import json
 import os
 import sys
-import time
-import urllib.parse
-import urllib.request
 
-
-WPI_QUERY_URL = (
-    "https://vcps.nga.mil/"
-    "nauticalpubs-feature/rest/services/"
-    "WPI/World_Port_Index_Viewer/"
-    "FeatureServer/0/query"
-)
 
 OUTPUT_FILE = "data/ports/wpi-japan.csv"
-
-PAGE_SIZE = 2000
-
-
-def fetch_json(url, params):
-    query = urllib.parse.urlencode(params)
-    request_url = f"{url}?{query}"
-
-    request = urllib.request.Request(
-        request_url,
-        headers={
-            "User-Agent": "JJ200236-WPI-Sync/1.0",
-            "Accept": "application/json",
-        },
-    )
-
-    # NGA WPIサーバーはGitHub Actions環境からアクセスすると
-    # 自己署名証明書を含む証明書チェーンとして判定されるため、
-    # このNGA固定URLへの取得時のみ証明書検証を無効化する。
-    ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
-
-    with urllib.request.urlopen(
-        request,
-        timeout=60,
-        context=ssl_context,
-    ) as response:
-        return json.loads(
-            response.read().decode("utf-8")
-        )
-
-
-def get_all_wpi():
-    features = []
-    offset = 0
-
-    while True:
-        print(
-            f"WPI取得中: offset={offset}",
-            flush=True,
-        )
-
-        data = fetch_json(
-            WPI_QUERY_URL,
-            {
-                "where": "1=1",
-                "outFields": "*",
-                "returnGeometry": "true",
-                "outSR": "4326",
-                "resultOffset": offset,
-                "resultRecordCount": PAGE_SIZE,
-                "f": "json",
-            },
-        )
-
-        if "error" in data:
-            raise RuntimeError(
-                "NGA API error: "
-                + json.dumps(
-                    data["error"],
-                    ensure_ascii=False,
-                )
-            )
-
-        page = data.get(
-            "features",
-            [],
-        )
-
-        if not page:
-            break
-
-        # 最初の1件だけ実際の属性名をログ出力
-        if offset == 0:
-            sample_attributes = (
-                page[0].get(
-                    "attributes",
-                    {}
-                )
-            )
-
-            print(
-                "WPI実フィールド一覧:",
-                flush=True,
-            )
-
-            for key in sample_attributes.keys():
-                print(
-                    f"  {key}",
-                    flush=True,
-                )
-
-        features.extend(page)
-
-        print(
-            f"  {len(page)}件取得 "
-            f"/ 累計{len(features)}件",
-            flush=True,
-        )
-
-        offset += len(page)
-
-        exceeded = bool(
-            data.get(
-                "exceededTransferLimit",
-                False,
-            )
-        )
-
-        if (
-            len(page) < PAGE_SIZE
-            and not exceeded
-        ):
-            break
-
-        if offset > 50000:
-            raise RuntimeError(
-                "WPI取得件数が50,000件を超えたため停止"
-            )
-
-        time.sleep(0.5)
-
-    return features
 
 
 def normalize(value):
     if value is None:
         return ""
-
     return str(value).strip()
 
 
-def normalize_locode(value):
-    value = normalize(value).upper()
+def normalize_header(value):
+    return "".join(
+        ch.lower()
+        for ch in normalize(value)
+        if ch.isalnum()
+    )
 
+
+def normalize_locode(value):
     return "".join(
         ch
-        for ch in value
+        for ch in normalize(value).upper()
         if ch.isalnum()
     )
 
 
 def normalize_wpi_number(value):
-    if value is None:
+    value = normalize(value)
+
+    if not value:
         return ""
 
-    # ArcGIS側ではDoubleの場合があるため
-    # 12345.0 → 12345 にする
     try:
         number = float(value)
 
         if number.is_integer():
             return str(int(number))
-
-    except (ValueError, TypeError):
+    except ValueError:
         pass
 
-    return normalize(value)
+    return value
 
 
-def pick_attr(attributes, *names):
-    # 完全一致
-    for name in names:
-        if name in attributes:
-            return attributes.get(name)
-
-    # NGA側のフィールド名変更に多少耐える
-    normalized = {
-        "".join(
-            ch.lower()
-            for ch in str(key)
-            if ch.isalnum()
-        ): value
-        for key, value in attributes.items()
+def find_column(headers, *candidates):
+    normalized_headers = {
+        normalize_header(header): header
+        for header in headers
     }
 
-    for name in names:
-        key = "".join(
-            ch.lower()
-            for ch in name
-            if ch.isalnum()
-        )
+    for candidate in candidates:
+        key = normalize_header(candidate)
 
-        if key in normalized:
-            return normalized[key]
+        if key in normalized_headers:
+            return normalized_headers[key]
 
-    return ""
+    return None
 
 
-def is_japan(attributes):
-    country = normalize(
-        pick_attr(
-            attributes,
-            "countryCode",
-            "country_code",
-            "wpi_cc",
-        )
-    ).upper()
+def get_value(row, column):
+    if not column:
+        return ""
 
-    locode = normalize_locode(
-        pick_attr(
-            attributes,
-            "unlocode",
-        )
+    return normalize(
+        row.get(column, "")
     )
 
-    # WPIのCountry CodeはGENC系表記の可能性があるため、
-    # UN/LOCODEのJPプレフィックスも併用する。
+
+def is_japan(country, locode):
+    country = normalize(country).upper()
+    locode = normalize_locode(locode)
+
     return (
         country in {
             "JP",
@@ -236,77 +84,195 @@ def is_japan(attributes):
     )
 
 
-def convert_feature(feature):
-    attributes = feature.get(
-        "attributes",
-        {},
-    )
+def main():
+    if len(sys.argv) < 2:
+        raise RuntimeError(
+            "入力CSVファイルを指定してください。"
+        )
 
-    geometry = feature.get(
-        "geometry",
-        {},
-    )
+    input_file = sys.argv[1]
 
-    wpi_number = normalize_wpi_number(
-        pick_attr(
-            attributes,
+    if not os.path.exists(input_file):
+        raise RuntimeError(
+            f"入力CSVがありません: {input_file}"
+        )
+
+    with open(
+        input_file,
+        "r",
+        encoding="utf-8-sig",
+        newline="",
+        errors="replace",
+    ) as file:
+
+        reader = csv.DictReader(file)
+
+        headers = reader.fieldnames or []
+
+        print(
+            "===== WPI CSV columns ====="
+        )
+
+        for header in headers:
+            print(
+                f"  {header}"
+            )
+
+        col_wpi = find_column(
+            headers,
+            "World Port Index Number",
+            "WPI Number",
+            "WPI_Number",
             "wpinumber",
-            "wpi_number",
         )
-    )
 
-    main_port_name = normalize(
-        pick_attr(
-            attributes,
+        col_name = find_column(
+            headers,
+            "Main Port Name",
+            "Main_Port_Name",
             "main_port_",
-            "main_port_name",
         )
-    )
 
-    alternate_port_name = normalize(
-        pick_attr(
-            attributes,
+        col_alt = find_column(
+            headers,
+            "Alternate Port Name",
+            "Alternate_Port_Name",
             "alternate_",
-            "alternate_name",
-            "alternate_port_name",
         )
-    )
 
-    unlocode = normalize_locode(
-        pick_attr(
-            attributes,
+        col_locode = find_column(
+            headers,
+            "UN/LOCODE",
+            "UNLOCODE",
             "unlocode",
         )
-    )
 
-    latitude = normalize(
-        geometry.get("y")
-    )
-
-    longitude = normalize(
-        geometry.get("x")
-    )
-
-    return {
-        "wpi_number": wpi_number,
-        "main_port_name": main_port_name,
-        "alternate_port_name": alternate_port_name,
-        "unlocode": unlocode,
-        "country_code": "JP",
-        "latitude": latitude,
-        "longitude": longitude,
-    }
-
-
-def validate(rows):
-    if not rows:
-        raise RuntimeError(
-            "日本の港が0件です。"
+        col_country = find_column(
+            headers,
+            "Country Code",
+            "Country_Code",
+            "countryCode",
         )
 
-    wpi_numbers = set()
+        col_lat = find_column(
+            headers,
+            "Latitude",
+            "latitude",
+            "Latitude_deg",
+        )
 
-    duplicate_wpi = []
+        col_lon = find_column(
+            headers,
+            "Longitude",
+            "longitude",
+            "Longitude_deg",
+        )
+
+        required = {
+            "WPI番号": col_wpi,
+            "港名": col_name,
+        }
+
+        missing = [
+            label
+            for label, column in required.items()
+            if not column
+        ]
+
+        if missing:
+            raise RuntimeError(
+                "必要な列が見つかりません: "
+                + ", ".join(missing)
+            )
+
+        print("")
+        print("===== 使用列 =====")
+        print(f"WPI番号: {col_wpi}")
+        print(f"港名: {col_name}")
+        print(f"別名: {col_alt}")
+        print(f"UN/LOCODE: {col_locode}")
+        print(f"国: {col_country}")
+        print(f"緯度: {col_lat}")
+        print(f"経度: {col_lon}")
+
+        rows = []
+
+        for source in reader:
+            country = get_value(
+                source,
+                col_country
+            )
+
+            locode = normalize_locode(
+                get_value(
+                    source,
+                    col_locode
+                )
+            )
+
+            if not is_japan(
+                country,
+                locode
+            ):
+                continue
+
+            row = {
+                "wpi_number":
+                    normalize_wpi_number(
+                        get_value(
+                            source,
+                            col_wpi
+                        )
+                    ),
+
+                "main_port_name":
+                    get_value(
+                        source,
+                        col_name
+                    ),
+
+                "alternate_port_name":
+                    get_value(
+                        source,
+                        col_alt
+                    ),
+
+                "unlocode":
+                    locode,
+
+                "country_code":
+                    "JP",
+
+                "latitude":
+                    get_value(
+                        source,
+                        col_lat
+                    ),
+
+                "longitude":
+                    get_value(
+                        source,
+                        col_lon
+                    ),
+            }
+
+            if not row[
+                "main_port_name"
+            ]:
+                continue
+
+            rows.append(row)
+
+    if not rows:
+        raise RuntimeError(
+            "日本の港を1件も抽出できませんでした。"
+        )
+
+    seen_wpi = set()
+
+    duplicates = []
+
+    valid_rows = []
 
     for row in rows:
         wpi = row[
@@ -314,34 +280,45 @@ def validate(rows):
         ]
 
         if not wpi:
-            raise RuntimeError(
-                "WPI番号が空の港があります: "
-                + row["main_port_name"]
+            print(
+                "WARNING: WPI番号なし:",
+                row["main_port_name"],
             )
+            continue
 
-        if wpi in wpi_numbers:
-            duplicate_wpi.append(
+        if wpi in seen_wpi:
+            duplicates.append(
                 wpi
             )
+            continue
 
-        wpi_numbers.add(
+        seen_wpi.add(
             wpi
         )
 
-    if duplicate_wpi:
-        raise RuntimeError(
-            "WPI番号重複: "
-            + ", ".join(
-                sorted(
-                    set(
-                        duplicate_wpi
-                    )
-                )
-            )
+        valid_rows.append(
+            row
         )
 
+    if duplicates:
+        print(
+            "WARNING: WPI番号重複:",
+            ", ".join(
+                sorted(
+                    set(
+                        duplicates
+                    )
+                )
+            ),
+        )
 
-def write_csv(rows):
+    valid_rows.sort(
+        key=lambda row: (
+            row["wpi_number"],
+            row["main_port_name"],
+        )
+    )
+
     os.makedirs(
         os.path.dirname(
             OUTPUT_FILE
@@ -349,7 +326,7 @@ def write_csv(rows):
         exist_ok=True,
     )
 
-    fieldnames = [
+    fields = [
         "wpi_number",
         "main_port_name",
         "alternate_port_name",
@@ -365,98 +342,35 @@ def write_csv(rows):
         encoding="utf-8",
         newline="",
     ) as file:
+
         writer = csv.DictWriter(
             file,
-            fieldnames=fieldnames,
+            fieldnames=fields,
         )
 
         writer.writeheader()
-
         writer.writerows(
-            rows
+            valid_rows
         )
-
-
-def main():
-    features = get_all_wpi()
-
-    print(
-        f"WPI全件: {len(features)}",
-        flush=True,
-    )
-
-    japan_features = [
-        feature
-        for feature in features
-        if is_japan(
-            feature.get(
-                "attributes",
-                {},
-            )
-        )
-    ]
-
-    rows = [
-        convert_feature(feature)
-        for feature in japan_features
-    ]
-
-    rows = [
-        row
-        for row in rows
-        if row["main_port_name"]
-    ]
-
-    rows.sort(
-        key=lambda row: (
-            row["wpi_number"],
-            row["main_port_name"],
-        )
-    )
-
-    validate(rows)
-
-    write_csv(rows)
 
     locode_count = sum(
         1
-        for row in rows
+        for row in valid_rows
         if row["unlocode"]
     )
 
+    print("")
+    print("===== 完了 =====")
     print(
-        "",
-        flush=True,
+        f"日本港: {len(valid_rows)}件"
     )
-
     print(
-        "=== 完了 ===",
-        flush=True,
+        f"UN/LOCODEあり: {locode_count}件"
     )
-
     print(
-        f"日本港: {len(rows)}件",
-        flush=True,
-    )
-
-    print(
-        f"UN/LOCODEあり: {locode_count}件",
-        flush=True,
-    )
-
-    print(
-        f"出力: {OUTPUT_FILE}",
-        flush=True,
+        f"出力: {OUTPUT_FILE}"
     )
 
 
 if __name__ == "__main__":
-    try:
-        main()
-
-    except Exception as exc:
-        print(
-            f"ERROR: {exc}",
-            file=sys.stderr,
-        )
-        raise
+    main()
