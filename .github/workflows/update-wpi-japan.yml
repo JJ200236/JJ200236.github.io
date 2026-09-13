@@ -22,8 +22,30 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Download NGA WPI CSV
+        run: |
+          mkdir -p work
+
+          curl \
+            --fail \
+            --location \
+            --retry 5 \
+            --retry-delay 5 \
+            --connect-timeout 30 \
+            --max-time 180 \
+            --insecure \
+            --output work/UpdatedPub150.csv \
+            "https://msi.nga.mil/api/publications/download?type=view&key=16920959/SFH00000/UpdatedPub150.csv"
+
+          echo "===== downloaded file ====="
+          ls -lh work/UpdatedPub150.csv
+
+          echo "===== first 3 lines ====="
+          head -3 work/UpdatedPub150.csv
+
       - name: Build Japan WPI CSV
-        run: python scripts/update_wpi_japan.py
+        run: |
+          python scripts/update_wpi_japan.py work/UpdatedPub150.csv
 
       - name: Show generated CSV
         run: |
