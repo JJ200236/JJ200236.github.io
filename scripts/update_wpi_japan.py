@@ -63,13 +63,7 @@ def get_all_wpi():
             WPI_QUERY_URL,
             {
                 "where": "1=1",
-                "outFields": (
-                    "wpinumber,"
-                    "main_port_,"
-                    "alternate_,"
-                    "unlocode,"
-                    "countryCode"
-                ),
+                "outFields": "*",
                 "returnGeometry": "true",
                 "outSR": "4326",
                 "resultOffset": offset,
@@ -94,6 +88,26 @@ def get_all_wpi():
 
         if not page:
             break
+
+        # 最初の1件だけ実際の属性名をログ出力
+        if offset == 0:
+            sample_attributes = (
+                page[0].get(
+                    "attributes",
+                    {}
+                )
+            )
+
+            print(
+                "WPI実フィールド一覧:",
+                flush=True,
+            )
+
+            for key in sample_attributes.keys():
+                print(
+                    f"  {key}",
+                    flush=True,
+                )
 
         features.extend(page)
 
