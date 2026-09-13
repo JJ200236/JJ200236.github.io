@@ -1,3 +1,4 @@
+import ssl
 import csv
 import json
 import os
@@ -26,14 +27,22 @@ def fetch_json(url, params):
     request = urllib.request.Request(
         request_url,
         headers={
-            "User-Agent": "jj200236-wpi-sync/1.0",
+            "User-Agent": "JJ200236-WPI-Sync/1.0",
             "Accept": "application/json",
         },
     )
 
+    # NGA WPIサーバーはGitHub Actions環境からアクセスすると
+    # 自己署名証明書を含む証明書チェーンとして判定されるため、
+    # このNGA固定URLへの取得時のみ証明書検証を無効化する。
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+
     with urllib.request.urlopen(
         request,
         timeout=60,
+        context=ssl_context,
     ) as response:
         return json.loads(
             response.read().decode("utf-8")
