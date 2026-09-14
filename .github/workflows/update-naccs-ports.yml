@@ -1,0 +1,97 @@
+name: Update NACCS Japan Ports
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 1 * *'
+
+permissions:
+  contents: write
+
+jobs:
+  update-naccs-ports:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download and normalize NACCS CSV
+        shell: python
+        run: |
+          from pathlib import Path
+          from urllib.request import Request, urlopen
+          import csv
+          import io
+
+          SOURCE = "https://bbs.naccscenter.com/data/code/code_edi/LOCODE_JP.csv"
+          DEST = Path("data/ports/naccs-japan-ports.csv")
+          DEST.parent.mkdir(parents=True, exist_ok=True)
+
+          req = Request(
+              SOURCE,
+              headers={
+                  "User-Agent": "Mozilla/5.0 GitHub-Actions NACCS-port-sync/1.0",
+                  "Accept": "text/csv,text/plain,application/octet-stream,*/*",
+              },
+          )
+
+          with urlopen(req, timeout=60) as res:
+              raw = res.read()
+
+          if not raw or len(raw) < 20:
+              raise RuntimeError("NACCS CSV download returned empty content")
+
+          try:
+              decoded = raw.decode("utf-8-sig", errors="strict")
+              source_encoding = "utf-8"
+          except UnicodeDecodeError:
+              decoded = raw.decode("cp932", errors="strict")
+              source_encoding = "cp932"
+
+          decoded = decoded.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+
+          rows = list(csv.reader(io.StringIO(decoded)))
+          if len(rows) < 2:
+              raise RuntimeError(f"NACCS CSV has too few rows: {len(rows)}")
+
+          japanese_chars = sum(
+              1 for ch in decoded
+              if ("\u3040" <= ch <= "\u30ff") or ("\u3400" <= ch <= "\u9fff")
+          )
+          if japanese_chars < 10:
+              raise RuntimeError(
+                  f"NACCS CSV does not look like Japanese data "
+                  f"(encoding={source_encoding}, japanese_chars={japanese_chars})"
+              )
+
+          DEST.write_text(decoded, encoding="utf-8", newline="\n")
+
+          print(f"source_encoding={source_encoding}")
+          print(f"bytes={len(raw)}")
+          print(f"rows={len(rows)}")
+          print(f"columns_first_row={len(rows[0]) if rows else 0}")
+          print(f"japanese_chars={japanese_chars}")
+          print(f"written={DEST}")
+
+      - name: Show first rows
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("data/ports/naccs-japan-ports.csv")
+          for i, line in enumerate(p.read_text(encoding="utf-8").splitlines()[:5], 1):
+              print(f"{i}: {line[:500]}")
+          PY
+
+      - name: Commit when changed
+        run: |
+          if git diff --quiet -- data/ports/naccs-japan-ports.csv; then
+            echo "No NACCS changes."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/ports/naccs-japan-ports.csv
+          git commit -m "Update NACCS Japan port codes"
+          git push
